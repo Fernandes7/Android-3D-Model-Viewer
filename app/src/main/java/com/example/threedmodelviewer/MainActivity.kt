@@ -4,12 +4,18 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -26,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -33,6 +40,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.example.threedmodelviewer.ui.theme.ThreeDModelViewerTheme
@@ -52,6 +61,7 @@ import io.github.sceneview.rememberFillLightNode
 import io.github.sceneview.rememberMainLightNode
 import io.github.sceneview.rememberModelLoader
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,9 +80,18 @@ class MainActivity : ComponentActivity() {
 private const val UNITS_PER_PIXEL = 1f / 800f
 private const val CONTAINER_SIZE_DP = 220
 private const val MIN_CONTAINER_DP = 80
+private const val ROTATE_SENSITIVITY = 0.4f
+private const val MIN_ZOOM = 0.3f
+private const val MAX_ZOOM = 3f
+
 private class PlacedModel(val id: Long, val model: Model, val normalizedScale: Float) {
     var centerPx by mutableStateOf(Offset.Zero)
     var sizePx by mutableFloatStateOf(0f)
+    var interactionMode by mutableStateOf(false)
+    var labelsVisible by mutableStateOf(false)
+    var yawDeg by mutableFloatStateOf(0f)
+    var pitchDeg by mutableFloatStateOf(0f)
+    var userZoom by mutableFloatStateOf(1f)
 }
 
 private fun screenToWorld(px: Offset, viewSize: IntSize): Position = Position(
@@ -132,6 +151,11 @@ private fun ModelGallery() {
         models += placed
     }
 
+    fun closeModel(placed: PlacedModel) {
+        models -= placed
+        modelLoader.destroyModel(placed.model)
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         SceneView(
             modifier = Modifier
@@ -150,7 +174,8 @@ private fun ModelGallery() {
                 ModelNode(
                     modelInstance = placed.model.instance,
                     position = screenToWorld(placed.centerPx, viewSize),
-                    scale = Scale(placed.normalizedScale * placed.sizePx * UNITS_PER_PIXEL)
+                    rotation = Rotation(x = placed.pitchDeg, y = placed.yawDeg, z = 0f),
+                    scale = Scale(placed.normalizedScale * placed.sizePx * UNITS_PER_PIXEL * placed.userZoom)
                 )
             }
         }
@@ -166,18 +191,45 @@ private fun ModelGallery() {
                     }
                     .pointerInput(placed.id) {
                         detectTransformGestures { _, pan, zoom, _ ->
-                            val halfSize = placed.sizePx / 2
-                            val maxX = (viewSize.width - halfSize).coerceAtLeast(halfSize)
-                            val maxY = (viewSize.height - halfSize).coerceAtLeast(halfSize)
-                            placed.centerPx = Offset(
-                                (placed.centerPx.x + pan.x).coerceIn(halfSize, maxX),
-                                (placed.centerPx.y + pan.y).coerceIn(halfSize, maxY)
-                            )
-                            val maxContainerPx = minOf(viewSize.width, viewSize.height) * 0.9f
-                            placed.sizePx = (placed.sizePx * zoom).coerceIn(minContainerPx, maxContainerPx)
+                            if (placed.interactionMode) {
+                                placed.yawDeg += pan.x * ROTATE_SENSITIVITY
+                                placed.pitchDeg = (placed.pitchDeg - pan.y * ROTATE_SENSITIVITY).coerceIn(-89f, 89f)
+                                placed.userZoom = (placed.userZoom * zoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                            } else {
+                                val halfSize = placed.sizePx / 2
+                                val maxX = (viewSize.width - halfSize).coerceAtLeast(halfSize)
+                                val maxY = (viewSize.height - halfSize).coerceAtLeast(halfSize)
+                                placed.centerPx = Offset(
+                                    (placed.centerPx.x + pan.x).coerceIn(halfSize, maxX),
+                                    (placed.centerPx.y + pan.y).coerceIn(halfSize, maxY)
+                                )
+                                val maxContainerPx = minOf(viewSize.width, viewSize.height) * 0.9f
+                                placed.sizePx = (placed.sizePx * zoom).coerceIn(minContainerPx, maxContainerPx)
+                            }
                         }
                     }
             )
+        }
+
+        for (placed in models) {
+            val sizeDp = with(density) { placed.sizePx.toDp() }
+            Box(
+                modifier = Modifier
+                    .size(width = sizeDp, height = 44.dp)
+                    .offset {
+                        IntOffset(
+                            (placed.centerPx.x - placed.sizePx / 2).roundToInt(),
+                            (placed.centerPx.y + placed.sizePx / 2 + with(density) { 8.dp.toPx() }).roundToInt()
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ModelControlButton(R.drawable.interact, placed.interactionMode) { placed.interactionMode = !placed.interactionMode }
+                    ModelControlButton(R.drawable.label, placed.labelsVisible) { placed.labelsVisible = !placed.labelsVisible }
+                    ModelControlButton(R.drawable.close, false) { closeModel(placed) }
+                }
+            }
         }
 
         Box(modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)) {
@@ -196,5 +248,24 @@ private fun ModelGallery() {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ModelControlButton(iconRes: Int, active: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(if (active) Color.Cyan else Color.White)
+            .clickable(onClick = onClick)
+            .padding(8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            painter = painterResource(iconRes),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
