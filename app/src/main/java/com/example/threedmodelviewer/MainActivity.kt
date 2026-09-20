@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -16,7 +17,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -24,10 +24,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.example.threedmodelviewer.ui.theme.ThreeDModelViewerTheme
+import com.google.android.filament.Camera
 import io.github.sceneview.ExperimentalSceneViewApi
 import io.github.sceneview.SceneView
 import io.github.sceneview.environment.EnvironmentPresets
@@ -58,17 +64,28 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private const val ROTATE_SENSITIVITY = 0.4f
-private const val GRID_SPACING = 1.3f
-private const val GRID_COLUMNS = 3
+/** World units per screen pixel for the orthographic camera — makes drag-to-move a direct
+ * pixel-to-world translation, with no perspective math. */
+private const val UNITS_PER_PIXEL = 1f / 800f
+private const val CONTAINER_SIZE_DP = 220
 
-/** One model instance placed in the shared scene: its own Filament model plus a fixed grid slot. */
-private class PlacedModel(val id: Long, val model: Model, val normalizedScale: Float, val position: Position)
+/** One model instance placed in the shared scene: its own Filament model plus a screen-space
+ * container position that drag directly follows. */
+private class PlacedModel(val id: Long, val model: Model, val normalizedScale: Float) {
+    var centerPx by mutableStateOf(Offset.Zero)
+}
+
+private fun screenToWorld(px: Offset, viewSize: IntSize): Position = Position(
+    x = (px.x - viewSize.width / 2f) * UNITS_PER_PIXEL,
+    y = (viewSize.height / 2f - px.y) * UNITS_PER_PIXEL,
+    z = 0f
+)
 
 @OptIn(ExperimentalSceneViewApi::class)
 @Composable
 private fun ModelGallery() {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
     val cameraNode = rememberCameraNode(engine)
@@ -82,8 +99,17 @@ private fun ModelGallery() {
         )
     }
 
-    LaunchedEffect(Unit) {
-        cameraNode.position = Position(z = 14f)
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+
+    // Orthographic camera: screen pixels map linearly to world X/Y, refit only on layout change.
+    LaunchedEffect(viewSize) {
+        if (viewSize.width > 0 && viewSize.height > 0) {
+            val halfW = (viewSize.width / 2f * UNITS_PER_PIXEL).toDouble()
+            val halfH = (viewSize.height / 2f * UNITS_PER_PIXEL).toDouble()
+            cameraNode.position = Position(z = 10f)
+            cameraNode.rotation = Rotation(0f, 0f, 0f)
+            cameraNode.setProjection(Camera.Projection.ORTHO, -halfW, halfW, -halfH, halfH, 0.1, 100.0)
+        }
     }
 
     val availableFiles = remember {
@@ -92,36 +118,25 @@ private fun ModelGallery() {
     val models = remember { mutableStateListOf<PlacedModel>() }
     var nextId by remember { mutableLongStateOf(0L) }
     var menuExpanded by remember { mutableStateOf(false) }
+    val containerDp = CONTAINER_SIZE_DP.dp
+    val containerPx = with(density) { containerDp.toPx() }
 
     fun addModel(fileName: String) {
         val model = modelLoader.createModel("models/$fileName", releaseSourceData = false)
         val half = model.boundingBox.halfExtentSize
         val maxExtent = max(half.x, max(half.y, half.z)) * 2f
         val normalizedScale = if (maxExtent > 0f) 1f / maxExtent else 1f
-        val slot = models.size
-        val col = slot % GRID_COLUMNS
-        val row = slot / GRID_COLUMNS
-        val position = Position(
-            x = (col - (GRID_COLUMNS - 1) / 2f) * GRID_SPACING,
-            y = -row * GRID_SPACING,
-            z = 0f
-        )
-        models += PlacedModel(nextId++, model, normalizedScale, position)
+        val placed = PlacedModel(nextId++, model, normalizedScale)
+        val stagger = (models.size % 5) * (containerPx * 0.15f)
+        placed.centerPx = Offset(viewSize.width / 2f + stagger, viewSize.height / 2f + stagger)
+        models += placed
     }
-
-    var yawDeg by remember { mutableFloatStateOf(0f) }
-    var pitchDeg by remember { mutableFloatStateOf(0f) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         SceneView(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectDragGestures { _, dragAmount ->
-                        yawDeg += dragAmount.x * ROTATE_SENSITIVITY
-                        pitchDeg = (pitchDeg - dragAmount.y * ROTATE_SENSITIVITY).coerceIn(-89f, 89f)
-                    }
-                },
+                .onSizeChanged { viewSize = it },
             engine = engine,
             modelLoader = modelLoader,
             environment = environment,
@@ -129,15 +144,43 @@ private fun ModelGallery() {
             mainLightNode = mainLightNode,
             fillLightNode = fillLightNode,
             cameraManipulator = null,
+            // Default true: the library recenters the union of all node bounding boxes onto the
+            // origin every frame, silently overriding any manually-set per-node `position`.
+            autoCenterContent = false,
         ) {
             for (placed in models) {
                 ModelNode(
                     modelInstance = placed.model.instance,
-                    position = placed.position,
-                    rotation = Rotation(x = pitchDeg, y = yawDeg, z = 0f),
-                    scale = Scale(placed.normalizedScale)
+                    position = screenToWorld(placed.centerPx, viewSize),
+                    scale = Scale(placed.normalizedScale * containerPx * UNITS_PER_PIXEL)
                 )
             }
+        }
+
+        // Invisible per-model touch targets: graphicsLayer moves them on drag (render-only, no
+        // relayout/recomposition per pixel), and Compose's own hit-testing routes each pointer to
+        // whichever one is under it — no manual multi-touch bookkeeping needed.
+        for (placed in models) {
+            Box(
+                modifier = Modifier
+                    .size(containerDp)
+                    .graphicsLayer {
+                        translationX = placed.centerPx.x - containerPx / 2
+                        translationY = placed.centerPx.y - containerPx / 2
+                    }
+                    .pointerInput(placed.id) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            val halfSize = containerPx / 2
+                            val maxX = (viewSize.width - halfSize).coerceAtLeast(halfSize)
+                            val maxY = (viewSize.height - halfSize).coerceAtLeast(halfSize)
+                            placed.centerPx = Offset(
+                                (placed.centerPx.x + dragAmount.x).coerceIn(halfSize, maxX),
+                                (placed.centerPx.y + dragAmount.y).coerceIn(halfSize, maxY)
+                            )
+                        }
+                    }
+            )
         }
 
         Box(modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)) {
