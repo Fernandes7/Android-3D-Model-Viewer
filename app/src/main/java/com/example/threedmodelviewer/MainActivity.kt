@@ -2,8 +2,11 @@ package com.example.threedmodelviewer
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -15,10 +18,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +38,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,12 +50,20 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.threedmodelviewer.ui.theme.Pink40
+import com.example.threedmodelviewer.ui.theme.Pink80
+import com.example.threedmodelviewer.ui.theme.Purple40
+import com.example.threedmodelviewer.ui.theme.Purple80
+import com.example.threedmodelviewer.ui.theme.PurpleGrey40
 import com.example.threedmodelviewer.ui.theme.ThreeDModelViewerTheme
 import com.google.android.filament.Camera
 import io.github.sceneview.ExperimentalSceneViewApi
+import io.github.sceneview.RenderQuality
 import io.github.sceneview.SceneView
 import io.github.sceneview.environment.EnvironmentPresets
 import io.github.sceneview.math.Position
@@ -54,6 +71,8 @@ import io.github.sceneview.math.Rotation
 import io.github.sceneview.math.Scale
 import io.github.sceneview.math.halfExtentSize
 import io.github.sceneview.model.Model
+import io.github.sceneview.node.Node
+import io.github.sceneview.node.ModelNode as ModelNodeImpl
 import io.github.sceneview.rememberCameraNode
 import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberEnvironmentLoader
@@ -62,11 +81,13 @@ import io.github.sceneview.rememberMainLightNode
 import io.github.sceneview.rememberModelLoader
 import kotlin.math.max
 import kotlin.math.roundToInt
+import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        val lightBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+        enableEdgeToEdge(statusBarStyle = lightBarStyle, navigationBarStyle = lightBarStyle)
         setContent {
             ThreeDModelViewerTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -84,6 +105,10 @@ private const val ROTATE_SENSITIVITY = 0.4f
 private const val MIN_ZOOM = 0.3f
 private const val MAX_ZOOM = 3f
 
+private class NodeLabel(val node: Node, val text: String)
+
+private data class LabelPlacement(val anchor: Offset, val textPos: Offset, val text: String)
+
 private class PlacedModel(val id: Long, val model: Model, val normalizedScale: Float) {
     var centerPx by mutableStateOf(Offset.Zero)
     var sizePx by mutableFloatStateOf(0f)
@@ -92,6 +117,7 @@ private class PlacedModel(val id: Long, val model: Model, val normalizedScale: F
     var yawDeg by mutableFloatStateOf(0f)
     var pitchDeg by mutableFloatStateOf(0f)
     var userZoom by mutableFloatStateOf(1f)
+    var labels: List<NodeLabel> = emptyList()
 }
 
 private fun screenToWorld(px: Offset, viewSize: IntSize): Position = Position(
@@ -99,6 +125,63 @@ private fun screenToWorld(px: Offset, viewSize: IntSize): Position = Position(
     y = (viewSize.height / 2f - px.y) * UNITS_PER_PIXEL,
     z = 0f
 )
+
+private fun <T> Iterable<T>.toNodeLabels(): List<NodeLabel> where T : Node, T : ModelNodeImpl.ChildNode =
+    mapNotNull { child ->
+        child.extras
+            ?.let { runCatching { JSONObject(it).optString("prop") }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+            ?.let { text -> NodeLabel(child, text) }
+    }
+
+private val modelAvatarPalette = listOf(Purple40, PurpleGrey40, Pink40, Purple80, Pink80)
+
+@Composable
+private fun ModelPickerMenu(
+    expanded: Boolean,
+    availableFiles: List<String>,
+    onDismissRequest: () -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
+        modifier = Modifier.widthIn(min = 220.dp),
+        shape = RoundedCornerShape(20.dp),
+        containerColor = Color(0xFF1C1B1F),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+    ) {
+        Text(
+            text = stringResource(R.string.pick_a_model),
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        availableFiles.forEachIndexed { index, fileName ->
+            val name = fileName.removeSuffix(".glb")
+            DropdownMenuItem(
+                text = { Text(name, color = Color.White) },
+                leadingIcon = {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(modelAvatarPalette[index % modelAvatarPalette.size]),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = name.take(1).uppercase(), color = Color.White, fontSize = 14.sp)
+                    }
+                },
+                colors = MenuDefaults.itemColors(textColor = Color.White),
+                onClick = {
+                    onDismissRequest()
+                    onSelect(fileName)
+                }
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalSceneViewApi::class)
 @Composable
@@ -138,9 +221,31 @@ private fun ModelGallery() {
     var menuExpanded by remember { mutableStateOf(false) }
     val defaultContainerPx = with(density) { CONTAINER_SIZE_DP.dp.toPx() }
     val minContainerPx = with(density) { MIN_CONTAINER_DP.dp.toPx() }
+    val labelOffsetPx = with(density) { 28.dp.toPx() }
+    var labelPlacements by remember { mutableStateOf<List<LabelPlacement>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            withFrameNanos {
+                val visibleModels = models.filter { it.labelsVisible }
+                if (visibleModels.isEmpty()) {
+                    if (labelPlacements.isNotEmpty()) labelPlacements = emptyList()
+                } else {
+                    labelPlacements = visibleModels.flatMap { placed ->
+                        placed.labels.mapNotNull { label ->
+                            cameraNode.worldToView(label.node.worldPosition)?.let { view ->
+                                val anchor = Offset(view.x * viewSize.width, (1f - view.y) * viewSize.height)
+                                LabelPlacement(anchor, Offset(anchor.x + labelOffsetPx, anchor.y - labelOffsetPx), label.text)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fun addModel(fileName: String) {
-        val model = modelLoader.createModel("models/$fileName", releaseSourceData = false)
+        val model = modelLoader.createModel("models/$fileName")
         val half = model.boundingBox.halfExtentSize
         val maxExtent = max(half.x, max(half.y, half.z)) * 2f
         val normalizedScale = if (maxExtent > 0f) 1f / maxExtent else 1f
@@ -169,13 +274,15 @@ private fun ModelGallery() {
             fillLightNode = fillLightNode,
             cameraManipulator = null,
             autoCenterContent = false,
+            renderQuality = RenderQuality.Performance,
         ) {
             for (placed in models) {
                 ModelNode(
                     modelInstance = placed.model.instance,
                     position = screenToWorld(placed.centerPx, viewSize),
                     rotation = Rotation(x = placed.pitchDeg, y = placed.yawDeg, z = 0f),
-                    scale = Scale(placed.normalizedScale * placed.sizePx * UNITS_PER_PIXEL * placed.userZoom)
+                    scale = Scale(placed.normalizedScale * placed.sizePx * UNITS_PER_PIXEL * placed.userZoom),
+                    apply = { placed.labels = renderableNodes.toNodeLabels() + emptyNodes.toNodeLabels() }
                 )
             }
         }
@@ -193,8 +300,13 @@ private fun ModelGallery() {
                         detectTransformGestures { _, pan, zoom, _ ->
                             if (placed.interactionMode) {
                                 placed.yawDeg += pan.x * ROTATE_SENSITIVITY
-                                placed.pitchDeg = (placed.pitchDeg - pan.y * ROTATE_SENSITIVITY).coerceIn(-89f, 89f)
-                                placed.userZoom = (placed.userZoom * zoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                                placed.pitchDeg =
+                                    (placed.pitchDeg - pan.y * ROTATE_SENSITIVITY).coerceIn(
+                                        -89f,
+                                        89f
+                                    )
+                                placed.userZoom =
+                                    (placed.userZoom * zoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
                             } else {
                                 val halfSize = placed.sizePx / 2
                                 val maxX = (viewSize.width - halfSize).coerceAtLeast(halfSize)
@@ -204,7 +316,8 @@ private fun ModelGallery() {
                                     (placed.centerPx.y + pan.y).coerceIn(halfSize, maxY)
                                 )
                                 val maxContainerPx = minOf(viewSize.width, viewSize.height) * 0.9f
-                                placed.sizePx = (placed.sizePx * zoom).coerceIn(minContainerPx, maxContainerPx)
+                                placed.sizePx =
+                                    (placed.sizePx * zoom).coerceIn(minContainerPx, maxContainerPx)
                             }
                         }
                     }
@@ -232,21 +345,41 @@ private fun ModelGallery() {
             }
         }
 
-        Box(modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            labelPlacements.forEach { label ->
+                drawLine(Color.Yellow, label.anchor, label.textPos, strokeWidth = 2.dp.toPx())
+                drawCircle(Color.Yellow, radius = 4.dp.toPx(), center = label.anchor)
+            }
+        }
+        for (label in labelPlacements) {
+            Text(
+                text = label.text,
+                color = Color.White,
+                fontSize = 10.sp,
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            label.textPos.x.roundToInt(),
+                            label.textPos.y.roundToInt()
+                        )
+                    }
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
+
+        Box(modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(24.dp)) {
             Button(onClick = { menuExpanded = true }) {
-                Text("Add model")
+                Text(stringResource(R.string.add_model))
             }
-            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                availableFiles.forEach { fileName ->
-                    DropdownMenuItem(
-                        text = { Text(fileName.removeSuffix(".glb")) },
-                        onClick = {
-                            menuExpanded = false
-                            addModel(fileName)
-                        }
-                    )
-                }
-            }
+            ModelPickerMenu(
+                expanded = menuExpanded,
+                availableFiles = availableFiles,
+                onDismissRequest = { menuExpanded = false },
+                onSelect = { fileName -> addModel(fileName) }
+            )
         }
     }
 }

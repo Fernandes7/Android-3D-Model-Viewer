@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">ThreeDModelViewer</string>
+    <string name="add_model">Add model</string>
+    <string name="pick_a_model">Pick a model</string>
 </resources>
