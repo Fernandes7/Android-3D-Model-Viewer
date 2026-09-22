@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -275,9 +276,11 @@ fun ModelGallery() {
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(24.dp)
+                .padding(horizontal = 24.dp)
+                .navigationBarsPadding()
         ) {
-            Button(onClick = { menuExpanded = true }) {
+            Button(
+                onClick = { menuExpanded = true }) {
                 Text(stringResource(R.string.add_model))
             }
             ModelPickerMenu(
