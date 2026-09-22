@@ -14,8 +14,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -160,7 +162,6 @@ fun ModelGallery() {
 
     fun closeModel(placed: PlacedModel) {
         models -= placed
-        modelLoader.destroyModel(placed.model)
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -181,13 +182,21 @@ fun ModelGallery() {
             renderQuality = RenderQuality.Performance,
         ) {
             for (placed in models) {
-                ModelNode(
-                    modelInstance = placed.model.instance,
-                    position = screenToWorld(placed.centerPx, viewSize),
-                    rotation = Rotation(x = placed.pitchDeg, y = placed.yawDeg, z = 0f),
-                    scale = Scale(placed.normalizedScale * placed.sizePx * UNITS_PER_PIXEL * placed.userZoom),
-                    apply = { placed.labels = renderableNodes.toNodeLabels() + emptyNodes.toNodeLabels() }
-                )
+                key(placed.id) {
+                    // Declaring this DisposableEffect before
+                    // ModelNode ensures it disposes AFTER ModelNode's own cleanup, since Compose disposes
+                    // sibling effects in reverse of declaration order.
+                    DisposableEffect(placed.id) {
+                        onDispose { modelLoader.destroyModel(placed.model) }
+                    }
+                    ModelNode(
+                        modelInstance = placed.model.instance,
+                        position = screenToWorld(placed.centerPx, viewSize),
+                        rotation = Rotation(x = placed.pitchDeg, y = placed.yawDeg, z = 0f),
+                        scale = Scale(placed.normalizedScale * placed.sizePx * UNITS_PER_PIXEL * placed.userZoom),
+                        apply = { placed.labels = renderableNodes.toNodeLabels() + emptyNodes.toNodeLabels() }
+                    )
+                }
             }
         }
 
